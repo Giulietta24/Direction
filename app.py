@@ -192,25 +192,6 @@ ETF_SECTORS = {
 
 }
 
-# ============================================================
-# FALLBACK HOLDINGS
-# Used when no FMP API key is entered.
-# Update these periodically or add an API key for live data.
-# ============================================================
-FALLBACK_HOLDINGS = {
-    "SPY":  [("MSFT","Microsoft",7.1),("AAPL","Apple",6.8),("NVDA","NVIDIA",6.5),("AMZN","Amazon",3.8),("META","Meta",2.7),("GOOGL","Alphabet A",2.1),("GOOG","Alphabet C",1.9),("TSLA","Tesla",1.7),("BRKB","Berkshire",1.7),("AVGO","Broadcom",1.6)],
-    "QQQ":  [("MSFT","Microsoft",8.9),("AAPL","Apple",8.5),("NVDA","NVIDIA",8.1),("AMZN","Amazon",5.2),("META","Meta",4.8),("GOOGL","Alphabet A",4.2),("GOOG","Alphabet C",3.9),("TSLA","Tesla",3.1),("AVGO","Broadcom",2.8),("COST","Costco",2.1)],
-    "XLK":  [("MSFT","Microsoft",22.1),("AAPL","Apple",21.8),("NVDA","NVIDIA",8.2),("AVGO","Broadcom",4.1),("AMD","AMD",2.8),("CRM","Salesforce",2.2),("NOW","ServiceNow",1.9),("CSCO","Cisco",1.8),("ORCL","Oracle",1.7),("ACN","Accenture",1.5)],
-    "SMH":  [("NVDA","NVIDIA",20.1),("TSM","Taiwan Semi",10.2),("AVGO","Broadcom",7.8),("ASML","ASML",5.1),("AMD","AMD",4.9),("QCOM","Qualcomm",4.2),("INTC","Intel",3.1),("MU","Micron",3.0),("AMAT","Applied Materials",2.9),("LRCX","Lam Research",2.8)],
-    "SOXX": [("NVDA","NVIDIA",8.5),("AVGO","Broadcom",8.3),("AMD","AMD",5.2),("QCOM","Qualcomm",5.1),("TSM","Taiwan Semi",5.0),("AMAT","Applied Materials",4.8),("ASML","ASML",4.7),("LRCX","Lam Research",4.6),("MU","Micron",4.5),("KLAC","KLA Corp",4.4)],
-    "XLE":  [("XOM","ExxonMobil",22.5),("CVX","Chevron",15.2),("COP","ConocoPhillips",8.1),("EOG","EOG Resources",5.2),("SLB","SLB",4.8),("MPC","Marathon Petroleum",4.1),("PSX","Phillips 66",3.8),("VLO","Valero",3.6),("HAL","Halliburton",3.1),("DVN","Devon Energy",2.9)],
-    "XLF":  [("BRKB","Berkshire",14.1),("JPM","JPMorgan",9.8),("V","Visa",8.2),("MA","Mastercard",6.1),("BAC","Bank of America",4.2),("WFC","Wells Fargo",3.8),("GS","Goldman Sachs",2.9),("MS","Morgan Stanley",2.7),("BLK","BlackRock",2.1),("SPGI","S&P Global",1.9)],
-    "XLV":  [("LLY","Eli Lilly",13.2),("UNH","UnitedHealth",12.8),("JNJ","J&J",6.8),("ABBV","AbbVie",6.1),("MRK","Merck",5.9),("TMO","Thermo Fisher",4.1),("ABT","Abbott",3.8),("DHR","Danaher",3.1),("BMY","Bristol-Myers",2.9),("AMGN","Amgen",2.8)],
-    "XLI":  [("RTX","Raytheon",5.1),("CAT","Caterpillar",5.0),("UNP","Union Pacific",4.8),("HON","Honeywell",4.7),("UPS","UPS",4.2),("GE","GE",4.0),("LMT","Lockheed Martin",3.5),("BA","Boeing",3.2),("DE","Deere",3.0),("CSX","CSX",2.8)],
-    "XLY":  [("AMZN","Amazon",23.1),("TSLA","Tesla",16.8),("HD","Home Depot",10.2),("MCD","McDonald's",5.1),("NKE","Nike",4.2),("SBUX","Starbucks",3.8),("LOW","Lowe's",3.5),("BKNG","Booking",3.1),("TJX","TJX",2.9),("CMG","Chipotle",2.7)],
-    "IBB":  [("AMGN","Amgen",8.1),("VRTX","Vertex",7.8),("REGN","Regeneron",7.5),("GILD","Gilead",6.9),("MRNA","Moderna",3.1),("BIIB","Biogen",3.0),("ILMN","Illumina",2.8),("ALNY","Alnylam",2.5),("SGEN","Seagen",2.3),("EXEL","Exelixis",2.1)],
-}
-
 
 # ============================================================
 # HELPER FUNCTIONS
@@ -289,36 +270,87 @@ def fetch_etf_row(ticker, name):
                 "52W Range %": None, "P/C Ratio": None, "Sentiment": "Error"}
 
 
-@st.cache_data(ttl=86400)   # cache for 24 hours (holdings don't change much)
+@st.cache_data(ttl=86400)   # refresh once per day — holdings rarely change intraday
 def fetch_holdings(etf_ticker, fmp_api_key=""):
     """
-    Gets top 15 ETF holdings.
-    • If FMP API key provided → live data from financialmodelingprep.com
-    • Otherwise → static fallback for major ETFs
+    Fetches live ETF holdings using two sources (no static fallback):
+
+    Source 1 — stockanalysis.com  (free, live, covers every ETF, no key needed)
+    Source 2 — FMP API            (if you added a key in the sidebar)
+
+    If both fail the app tells you exactly where to look it up yourself.
+    Holdings are cached for 24 hours so the app doesn't fetch on every click.
     """
+
+    # ── Source 1: stockanalysis.com ──────────────────────────
+    try:
+        url = f"https://stockanalysis.com/etf/{etf_ticker.lower()}/holdings/"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        r = requests.get(url, headers=headers, timeout=12)
+        if r.status_code == 200:
+            tables = pd.read_html(r.text)
+            if tables:
+                df = tables[0].head(15).copy()
+
+                # Normalise column names — stockanalysis uses slightly different labels
+                col_map = {}
+                for c in df.columns:
+                    cl = str(c).lower()
+                    if "symbol" in cl or "ticker" in cl:
+                        col_map[c] = "Ticker"
+                    elif "name" in cl or "company" in cl:
+                        col_map[c] = "Name"
+                    elif "weight" in cl or cl == "%":
+                        col_map[c] = "Weight %"
+                df = df.rename(columns=col_map)
+
+                keep = [c for c in ["Ticker", "Name", "Weight %"] if c in df.columns]
+                if "Ticker" in keep:
+                    df = df[keep]
+                    if "Weight %" in df.columns:
+                        df["Weight %"] = (
+                            df["Weight %"].astype(str)
+                            .str.replace("%", "", regex=False).str.strip()
+                        )
+                        df["Weight %"] = pd.to_numeric(df["Weight %"], errors="coerce").round(2)
+                        df = df.sort_values("Weight %", ascending=False)
+                    df = df.reset_index(drop=True)
+                    df["Source"] = "🟢 Live — stockanalysis.com"
+                    return df
+    except Exception:
+        pass
+
+    # ── Source 2: FMP API (only if key provided) ─────────────
     if fmp_api_key:
-        url = (f"https://financialmodelingprep.com/api/v3/etf-holder/"
-               f"{etf_ticker}?apikey={fmp_api_key}")
         try:
+            url = (f"https://financialmodelingprep.com/api/v3/etf-holder/"
+                   f"{etf_ticker}?apikey={fmp_api_key}")
             r = requests.get(url, timeout=10)
             data = r.json()
             if isinstance(data, list) and data:
                 df = pd.DataFrame(data[:15])
                 df = df.rename(columns={
-                    "asset":             "Ticker",
-                    "weightPercentage":  "Weight %",
-                    "name":              "Name",
+                    "asset":            "Ticker",
+                    "weightPercentage": "Weight %",
+                    "name":             "Name",
                 })
-                df["Weight %"] = pd.to_numeric(df.get("Weight %", 0), errors="coerce").round(2)
+                df["Weight %"] = pd.to_numeric(
+                    df.get("Weight %", 0), errors="coerce"
+                ).round(2)
                 cols = [c for c in ["Ticker", "Name", "Weight %"] if c in df.columns]
-                return df[cols].sort_values("Weight %", ascending=False).reset_index(drop=True)
+                df = df[cols].sort_values("Weight %", ascending=False).reset_index(drop=True)
+                df["Source"] = "🟡 Live — FMP API"
+                return df
         except Exception:
-            pass  # fall through to static data
+            pass
 
-    # Static fallback
-    if etf_ticker in FALLBACK_HOLDINGS:
-        return pd.DataFrame(FALLBACK_HOLDINGS[etf_ticker], columns=["Ticker", "Name", "Weight %"])
-
+    # ── Both sources failed — return empty so UI can show instructions ──
     return pd.DataFrame(columns=["Ticker", "Name", "Weight %"])
 
 
@@ -621,9 +653,30 @@ with tab2:
             holdings = fetch_holdings(etf_ticker, fmp_key)
 
         if holdings.empty:
-            st.warning(
-                f"No holdings data for **{etf_ticker}**. "
-                "Add a free FMP API key in the sidebar to unlock all ETFs."
+            st.error(f"⚠️ Could not fetch live holdings for **{etf_ticker}**")
+            st.markdown("---")
+            st.markdown("**Look it up here and paste the tickers into Step 3 manually:**")
+
+            lookup_url = f"https://stockanalysis.com/etf/{etf_ticker.lower()}/holdings/"
+            etfdb_url  = f"https://etfdb.com/etf/{etf_ticker}/#holdings"
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.link_button(
+                    f"🔍 stockanalysis.com — {etf_ticker}",
+                    lookup_url,
+                    use_container_width=True,
+                )
+            with col2:
+                st.link_button(
+                    f"🔍 ETF Database — {etf_ticker}",
+                    etfdb_url,
+                    use_container_width=True,
+                )
+
+            st.info(
+                "Copy the top 10 ticker symbols from either site, "
+                "then paste them comma-separated into **Step 3** to run the options filter."
             )
         else:
             tickers_list = holdings["Ticker"].tolist()
