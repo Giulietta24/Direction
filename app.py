@@ -223,6 +223,219 @@ def color_range_cell(val):
     return "background-color: #fecaca"
 
 
+@st.cache_data(ttl=3600)
+def fetch_conflict_data(ticker):
+    """
+    Fetches extra data to explain WHY a conflict exists between
+    a bullish 52W range and a bearish P/C ratio.
+    Returns RSI, % above 50-day MA, put skew, and volume ratio.
+    """
+    try:
+        t    = yf.Ticker(ticker)
+        info = t.info
+        price = info.get("regularMarketPrice") or info.get("currentPrice") or 0
+        hist  = t.history(period="6mo")
+
+        if hist.empty or price == 0:
+            return None
+
+        closes  = hist["Close"]
+        volumes = hist["Volume"]
+
+        # ── RSI (14-period) ───────────────────────────────────
+        delta    = closes.diff()
+        gain     = delta.clip(lower=0).rolling(14).mean()
+        loss     = (-delta.clip(upper=0)).rolling(14).mean()
+        rs       = gain / loss
+        rsi      = round(float(100 - (100 / (1 + rs)).iloc[-1]), 1)
+
+        # ── % above 50-day moving average ─────────────────────
+        ma50         = closes.rolling(50).mean().iloc[-1]
+        pct_above_ma = round((price - float(ma50)) / float(ma50) * 100, 1)
+
+        # ── Put Skew (ATM put IV ÷ ATM call IV) ───────────────
+        put_skew = None
+        try:
+            dates = t.options
+            if dates:
+                chain    = t.option_chain(dates[0])
+                calls    = chain.calls
+                puts     = chain.puts
+                atm_c    = calls.iloc[(calls["strike"] - price).abs().argsort()[:1]]
+                atm_p    = puts.iloc[(puts["strike"]  - price).abs().argsort()[:1]]
+                call_iv  = float(atm_c["impliedVolatility"].values[0])
+                put_iv   = float(atm_p["impliedVolatility"].values[0])
+                if call_iv > 0:
+                    put_skew = round(put_iv / call_iv, 2)
+        except Exception:
+            pass
+
+        # ── Volume vs 20-day average ──────────────────────────
+        vol_20avg  = float(volumes.rolling(20).mean().iloc[-1])
+        recent_vol = float(volumes.iloc[-1])
+        vol_ratio  = round(recent_vol / vol_20avg, 2) if vol_20avg > 0 else None
+
+        return {
+            "ticker":       ticker,
+            "rsi":          rsi,
+            "pct_above_ma": pct_above_ma,
+            "put_skew":     put_skew,
+            "vol_ratio":    vol_ratio,
+        }
+    except Exception:
+        return None
+
+
+def interpret_conflict(data):
+    """
+    Takes the conflict metrics and returns plain-English interpretations
+    for each indicator plus an overall conclusion.
+    """
+    if not data:
+        return None
+
+    rsi          = data["rsi"]
+    pct_above_ma = data["pct_above_ma"]
+    put_skew     = data["put_skew"]
+    vol_ratio    = data["vol_ratio"]
+    warnings     = 0   # count how many indicators flash red
+
+    lines = {}
+
+    # ── RSI interpretation ────────────────────────────────────
+    if rsi >= 75:
+        lines["RSI"] = (
+            "rsi", "🔴", f"RSI {rsi} — Overbought",
+            "Price has risen too far too fast. Momentum is stretched. "
+            "Heavy put buying here is a genuine warning, not routine hedging. "
+            "A pullback is increasingly likely."
+        )
+        warnings += 1
+    elif rsi >= 60:
+        lines["RSI"] = (
+            "rsi", "🟡", f"RSI {rsi} — Elevated",
+            "Momentum is firm but not extreme. Put buying at this level "
+            "could still be cautious hedging by long holders rather than a directional bet."
+        )
+    else:
+        lines["RSI"] = (
+            "rsi", "🟢", f"RSI {rsi} — Not overbought",
+            "No momentum excess. The high P/C ratio is most likely "
+            "routine protection buying, not a warning sign."
+        )
+
+    # ── % above 50MA interpretation ───────────────────────────
+    if pct_above_ma >= 15:
+        lines["50-Day MA"] = (
+            "ma", "🔴", f"{pct_above_ma:+.1f}% above 50-day MA — Stretched",
+            f"Price is {pct_above_ma:.1f}% above its 50-day moving average — "
+            "think of it like a rubber band pulled very tight. "
+            "When large investors buy heavy puts while price is this stretched, "
+            "it often signals **distribution** — they are quietly selling "
+            "their shares into the retail buyers who are still pushing price up. "
+            "The price holds high because buyers keep coming, but the smart money is already leaving."
+        )
+        warnings += 1
+    elif pct_above_ma >= 7:
+        lines["50-Day MA"] = (
+            "ma", "🟡", f"{pct_above_ma:+.1f}% above 50-day MA — Moderately stretched",
+            "Some distance from the average but not extreme. "
+            "Price is extended but not at a level that typically signals distribution."
+        )
+    else:
+        lines["50-Day MA"] = (
+            "ma", "🟢", f"{pct_above_ma:+.1f}% above 50-day MA — Not stretched",
+            "Price is close to its average. The conflict is unlikely to be "
+            "about overextension — look to the skew and volume for clues instead."
+        )
+
+    # ── Put Skew interpretation ───────────────────────────────
+    if put_skew is not None:
+        if put_skew >= 1.3:
+            lines["Put Skew"] = (
+                "skew", "🔴", f"Put Skew {put_skew} — Significant",
+                f"Puts are {put_skew:.2f}x more expensive than equivalent calls. "
+                "The options market is paying a real premium for downside protection. "
+                "This is genuine institutional fear, not just routine hedging."
+            )
+            warnings += 1
+        elif put_skew >= 1.1:
+            lines["Put Skew"] = (
+                "skew", "🟡", f"Put Skew {put_skew} — Mild",
+                "A slight premium for puts — some caution in the market "
+                "but not at a level that suggests serious concern."
+            )
+        else:
+            lines["Put Skew"] = (
+                "skew", "🟢", f"Put Skew {put_skew} — Neutral",
+                "Puts and calls are similarly priced. "
+                "The high P/C volume ratio likely reflects hedging activity "
+                "rather than directional fear."
+            )
+    else:
+        lines["Put Skew"] = (
+            "skew", "⚪", "Put Skew — could not fetch",
+            "Unable to calculate. Check your broker's options chain for the skew."
+        )
+
+    # ── Volume interpretation ─────────────────────────────────
+    if vol_ratio is not None:
+        if vol_ratio < 0.7:
+            lines["Volume"] = (
+                "vol", "🔴", f"Volume {vol_ratio:.2f}x 20-day avg — Low",
+                "Price is moving up on below-average volume — fewer buyers are showing up. "
+                "Rising price + declining volume + heavy put buying is a classic "
+                "distribution signal: price is being held up but the buying pressure is fading."
+            )
+            warnings += 1
+        elif vol_ratio < 0.9:
+            lines["Volume"] = (
+                "vol", "🟡", f"Volume {vol_ratio:.2f}x 20-day avg — Below average",
+                "Volume is slightly soft. Not alarming on its own but "
+                "worth watching alongside the other signals."
+            )
+        else:
+            lines["Volume"] = (
+                "vol", "🟢", f"Volume {vol_ratio:.2f}x 20-day avg — Healthy",
+                "Volume is normal or above average. The price move has buyer participation. "
+                "The put buying is more likely hedging than a distribution warning."
+            )
+    else:
+        lines["Volume"] = (
+            "vol", "⚪", "Volume — could not calculate",
+            "Check your broker's volume data."
+        )
+
+    # ── Overall conclusion ─────────────────────────────────────
+    if warnings >= 3:
+        conclusion = (
+            "🚨 **Strong Distribution Warning** — Multiple indicators align with the bearish "
+            "put buying. Large investors appear to be selling into strength. "
+            "The bullish 52W range reflects where price HAS been, not where it's going. "
+            "Avoid new long entries. If already long, consider protective puts or reducing size."
+        )
+    elif warnings == 2:
+        conclusion = (
+            "⚠️ **Genuine Caution** — Two or more indicators back up the bearish put signal. "
+            "This is not routine hedging. Be selective — wait for a pullback before entering "
+            "or use defined-risk strategies (spreads) rather than naked long calls."
+        )
+    elif warnings == 1:
+        conclusion = (
+            "🟡 **Mixed Signal** — One indicator is flashing but others are fine. "
+            "The put buying may be precautionary rather than directional. "
+            "Monitor the flagged indicator over the next few days before acting."
+        )
+    else:
+        conclusion = (
+            "✅ **Likely Routine Hedging** — The indicators don't support a distribution thesis. "
+            "Large holders near the 52W high are simply protecting gains. "
+            "The bullish trend is still intact — the conflict is not a serious warning."
+        )
+
+    return {"lines": lines, "conclusion": conclusion, "warnings": warnings}
+
+
 # ============================================================
 # DATA FETCHING  (all cached so the app doesn't re-fetch
 #                 every time you click something)
@@ -637,6 +850,61 @@ with tab1:
                 }, na_rep="N/A")
             )
             st.dataframe(styled, use_container_width=True, hide_index=True)
+
+            # ── Conflict Analysis panel ───────────────────────
+            # Shows for any ETF where 52W range says Bullish (>=60%)
+            # but P/C ratio says Bearish (>1.0) — i.e. the two signals disagree.
+            conflicts = df_sector[
+                (df_sector["52W Range %"].fillna(0) >= 60) &
+                (df_sector["P/C Ratio"].fillna(0) > 1.0)
+            ]
+
+            if not conflicts.empty:
+                for _, row in conflicts.iterrows():
+                    ticker = row["Ticker"]
+                    pc     = row["P/C Ratio"]
+                    rng    = row["52W Range %"]
+
+                    with st.expander(
+                        f"⚡ Conflict detected — **{ticker}**  "
+                        f"(52W Range {rng:.1f}% Bullish  ×  P/C {pc:.2f} Bearish) — click to analyse",
+                        expanded=False
+                    ):
+                        with st.spinner(f"Fetching conflict data for {ticker}..."):
+                            cdata = fetch_conflict_data(ticker)
+                            interp = interpret_conflict(cdata)
+
+                        if not interp:
+                            st.warning("Could not fetch conflict data — try again shortly.")
+                        else:
+                            # ── What is a P/C conflict? ───────────────
+                            st.markdown(
+                                f"**What this means:** {ticker} is near its 52-week high "
+                                f"(52W Range {rng:.1f}%) — that looks bullish. "
+                                f"But the options market has a P/C ratio of **{pc:.2f}**, "
+                                f"meaning there are {pc:.1f}x more puts being bought than calls — "
+                                "that is bearish. These two signals are disagreeing. "
+                                "The indicators below help explain why."
+                            )
+                            st.divider()
+
+                            # ── Four indicator cards ──────────────────
+                            c1, c2 = st.columns(2)
+                            cols_cycle = [c1, c2, c1, c2]
+                            for col, (label, (_, icon, headline, detail)) in zip(
+                                cols_cycle, interp["lines"].items()
+                            ):
+                                with col:
+                                    st.markdown(f"**{icon} {label}**")
+                                    st.markdown(f"*{headline}*")
+                                    st.markdown(detail)
+                                    st.markdown("")
+
+                            st.divider()
+
+                            # ── Overall conclusion ────────────────────
+                            st.markdown("### Overall Interpretation")
+                            st.markdown(interp["conclusion"])
 
         # ── Full bar chart ────────────────────────────────────
         if all_rows:
