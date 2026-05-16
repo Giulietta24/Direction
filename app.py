@@ -445,15 +445,60 @@ def fetch_options_data(tickers):
                     signal = "🟡 Fair Value"
 
             # ── Next Earnings Date ────────────────────────────
-            earnings = "N/A"
+            # Three methods tried in order — stops as soon as one works.
+            # "⚠️ Check manually" means we couldn't fetch the date.
+            # That does NOT mean there are no earnings — always verify before trading.
+            earnings = "⚠️ Check manually"
+
+            # Method 1: earningsTimestampNext from info dict
+            # (fastest — info is already fetched above, no extra network call)
             try:
-                ed = t.get_earnings_dates(limit=8)
-                if ed is not None and not ed.empty:
-                    future = ed[ed.index.tz_localize(None) > pd.Timestamp.now()]
-                    if not future.empty:
-                        earnings = str(future.index[-1].date())
+                ts = info.get("earningsTimestampNext") or info.get("earningsTimestamp")
+                if ts:
+                    dt = pd.Timestamp(ts, unit="s")
+                    if dt > pd.Timestamp.now():
+                        earnings = str(dt.date())
             except Exception:
                 pass
+
+            # Method 2: ticker.calendar — contains a date range for the earnings window
+            if earnings == "⚠️ Check manually":
+                try:
+                    cal = t.calendar
+                    if cal and "Earnings Date" in cal:
+                        dates = cal["Earnings Date"]
+                        now   = pd.Timestamp.now()
+                        future_dates = []
+                        for d in dates:
+                            ts = pd.Timestamp(d)
+                            if ts.tzinfo is not None:
+                                ts = ts.tz_localize(None)
+                            if ts > now:
+                                future_dates.append(ts)
+                        if future_dates:
+                            earnings = str(sorted(future_dates)[0].date())
+                except Exception:
+                    pass
+
+            # Method 3: get_earnings_dates (least reliable — yfinance bug often omits future dates)
+            if earnings == "⚠️ Check manually":
+                try:
+                    ed = t.get_earnings_dates(limit=10)
+                    if ed is not None and not ed.empty:
+                        now = pd.Timestamp.now()
+                        idx = ed.index
+                        try:
+                            idx = idx.tz_localize(None)
+                        except Exception:
+                            try:
+                                idx = idx.tz_convert("UTC").tz_localize(None)
+                            except Exception:
+                                pass
+                        future = idx[idx > now]
+                        if len(future):
+                            earnings = str(future[-1].date())
+                except Exception:
+                    pass
 
             rows.append({
                 "Ticker":       ticker,
@@ -792,20 +837,42 @@ with tab3:
 
             # ── Earnings warning ──────────────────────────────
             st.markdown("#### ⚠️ Earnings Risk")
-            warnings_shown = False
+            warnings_shown   = False
+            check_manual     = []
+
             for _, row in opt_df.iterrows():
-                if row["Next Earnings"] != "N/A":
-                    try:
-                        days = (pd.to_datetime(row["Next Earnings"]) - pd.Timestamp.now()).days
-                        if 0 <= days <= 21:
-                            st.warning(
-                                f"**{row['Ticker']}** — earnings in **{days} days** "
-                                f"({row['Next Earnings']}).  "
-                                "IV will spike into this date — be careful with long options."
-                            )
-                            warnings_shown = True
-                    except Exception:
-                        pass
+                earned_str = str(row["Next Earnings"])
+
+                # Flag if we couldn't fetch the date — don't assume it's safe
+                if "Check manually" in earned_str:
+                    check_manual.append(row["Ticker"])
+                    continue
+
+                # If we got a real date, check if it's within 21 days
+                try:
+                    days = (pd.to_datetime(earned_str) - pd.Timestamp.now()).days
+                    if 0 <= days <= 21:
+                        st.warning(
+                            f"**{row['Ticker']}** — earnings in **{days} days** "
+                            f"({earned_str}).  "
+                            "IV will spike into this date — be careful with long options."
+                        )
+                        warnings_shown = True
+                    elif days > 21:
+                        st.success(f"**{row['Ticker']}** — next earnings {earned_str} ({days} days away) ✅")
+                        warnings_shown = True
+                except Exception:
+                    check_manual.append(row["Ticker"])
+
+            # Tickers where we couldn't get a date at all
+            if check_manual:
+                st.error(
+                    f"**Could not fetch earnings date for: {', '.join(check_manual)}** — "
+                    "check [Earnings Whispers](https://www.earningswhispers.com) or "
+                    "[Yahoo Finance](https://finance.yahoo.com) before trading."
+                )
+                warnings_shown = True
+
             if not warnings_shown:
                 st.success("No earnings within 21 days for the tickers checked. ✅")
 
