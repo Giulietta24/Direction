@@ -790,7 +790,7 @@ with tab1:
 
                 num_cols = ["1W %","1M %","3M %","RS vs SPY"]
                 st.dataframe(
-                    hm_df.style.applymap(_hm, subset=num_cols)
+                    hm_df.style.map(_hm, subset=num_cols)
                     .format({c: "{:+.1f}%" for c in num_cols}, na_rep="N/A"),
                     use_container_width=True, hide_index=True, height=400,
                 )
