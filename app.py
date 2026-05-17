@@ -999,29 +999,84 @@ with tab1:
 
                         with col_btn:
                             st.markdown("&nbsp;", unsafe_allow_html=True)
-                            # Store selection — Step 2 dropdowns will auto-select this ETF
+                            drill_key = f"show_drill_{ticker}"
+                            if drill_key not in st.session_state:
+                                st.session_state[drill_key] = False
                             if st.button(
-                                "Select →",
+                                "Drill Down ↓",
                                 key=f"pick_drill_{ticker}",
                                 use_container_width=True,
                                 type="primary",
                             ):
-                                # Write directly into the selectbox widget keys.
-                                # Streamlit selectboxes store their value under their key —
-                                # setting index= is ignored if the key already has a value.
-                                # Overwriting the key directly is the only reliable way.
-                                sector_names_local = list(ETF_SECTORS.keys())
-                                etf_labels_local   = [f"{t}  —  {n}" for t, n in ETF_SECTORS.get(sector, [])]
-                                matching_label     = next((l for l in etf_labels_local if l.startswith(ticker)), None)
+                                st.session_state[drill_key] = True
 
-                                if sector in sector_names_local:
-                                    st.session_state["s2_sector"] = sector
-                                if matching_label:
-                                    st.session_state["s2_etf"] = matching_label
+                    # ── Inline drill-down panel ───────────────
+                    # Opens directly below the card — no tab switching needed
+                    if st.session_state.get(f"show_drill_{ticker}", False):
+                        with st.container(border=True):
+                            st.markdown(f"#### 🔍 Holdings — {ticker} ({sector})")
+                            with st.spinner(f"Fetching {ticker} holdings..."):
+                                _holdings = fetch_holdings(ticker, fmp_key)
 
-                                # Also store for the banner
-                                st.session_state["drill_sector"] = sector
-                                st.session_state["drill_ticker"] = ticker
+                            if _holdings.empty:
+                                st.error(f"Could not fetch live holdings for {ticker}")
+                                c1, c2 = st.columns(2)
+                                with c1:
+                                    st.link_button(
+                                        f"stockanalysis.com — {ticker}",
+                                        f"https://stockanalysis.com/etf/{ticker.lower()}/holdings/",
+                                        use_container_width=True
+                                    )
+                                with c2:
+                                    st.link_button(
+                                        f"ETF Database — {ticker}",
+                                        f"https://etfdb.com/etf/{ticker}/#holdings",
+                                        use_container_width=True
+                                    )
+                                st.info("Copy the top 10 tickers → paste into Step 3")
+                            else:
+                                _tickers = _holdings["Ticker"].tolist()
+                                with st.spinner("Calculating relative strength..."):
+                                    _rs = calc_relative_strength(_tickers, ticker, period="1mo")
+
+                                if not _rs.empty:
+                                    _merged = _holdings.merge(
+                                        _rs[["Ticker","Return (1mo) %","vs ETF %","Status"]],
+                                        on="Ticker", how="left"
+                                    )
+                                else:
+                                    _merged = _holdings.copy()
+
+                                def _hl(row):
+                                    styles = [""] * len(row)
+                                    if "Status" in row.index:
+                                        i = list(row.index).index("Status")
+                                        if row["Status"] == "✅ Leading":
+                                            styles[i] = "background-color:#bbf7d0"
+                                        elif row["Status"] == "⚠️ Lagging":
+                                            styles[i] = "background-color:#fecaca"
+                                    return styles
+
+                                st.dataframe(
+                                    _merged.style.apply(_hl, axis=1),
+                                    use_container_width=True, hide_index=True
+                                )
+
+                                # Leading stocks summary
+                                if "Status" in _merged.columns:
+                                    _leading = _merged[_merged["Status"]=="✅ Leading"]["Ticker"].tolist()
+                                    if _leading:
+                                        st.success(f"**Leading stocks:** {', '.join(_leading)}")
+                                        st.info("👉 Copy these into **Step 3** to check options suitability")
+                                    # Paste-ready string
+                                    st.text_input(
+                                        "Copy leading tickers for Step 3:",
+                                        value=", ".join(_leading) if _leading else "",
+                                        key=f"copy_tickers_{ticker}"
+                                    )
+
+                            if st.button("Close ✕", key=f"close_drill_{ticker}"):
+                                st.session_state[f"show_drill_{ticker}"] = False
                                 st.rerun()
 
         st.divider()
