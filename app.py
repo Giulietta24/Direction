@@ -913,77 +913,118 @@ with tab1:
         if picks_rows:
             picks_df = pd.DataFrame(picks_rows)
 
-            # ── Quality filter ────────────────────────────────
-            # Must pass ALL of these to surface as a top pick
-            filtered = picks_df[
-                (picks_df["Score"].fillna(0)        >= 60)   &   # strong composite
-                (picks_df["RS vs SPY"].fillna(-99)  >= 0)    &   # beating the market
-                (picks_df["52W Range %"].fillna(0)  >= 55)   &   # near annual high
-                (~picks_df["P/C Signal"].str.contains("Bearish", na=False))  # P/C not bearish
+            # ── CALLS — strong upward momentum ───────────────
+            calls_filtered = picks_df[
+                (picks_df["Score"].fillna(0)       >= 60)  &
+                (picks_df["RS vs SPY"].fillna(-99) >= 0)   &
+                (picks_df["52W Range %"].fillna(0) >= 55)  &
+                (~picks_df["P/C Signal"].str.contains("Bearish", na=False))
+            ].sort_values("Score", ascending=False).head(5)
+
+            # ── PUTS — weak / breaking down ──────────────────
+            # Criteria for put candidates:
+            #   Low 52W range (near annual low = downtrend)
+            #   Underperforming SPY (lagging = relative weakness)
+            #   Bearish P/C signal (options market agrees)
+            #   OR: near 52W high but heavy puts (distribution)
+            puts_filtered = picks_df[
+                (
+                    # Classic downtrend: low range + lagging SPY
+                    (picks_df["52W Range %"].fillna(100) <= 40) &
+                    (picks_df["RS vs SPY"].fillna(0)     <= 0)
+                ) | (
+                    # Distribution: near high but P/C is very bearish
+                    (picks_df["52W Range %"].fillna(0)   >= 60) &
+                    (picks_df["P/C Signal"].str.contains("Bearish", na=False))
+                )
             ].copy()
 
-            # ── Sort by composite score ───────────────────────
-            filtered = filtered.sort_values("Score", ascending=False).head(5)
+            # Sort puts: worst RS vs SPY first (most bearish)
+            puts_filtered = puts_filtered.sort_values(
+                "RS vs SPY", ascending=True
+            ).head(5)
 
-            if filtered.empty:
-                st.info(
-                    "No ETFs currently pass all quality filters. "
-                    "This typically happens during broad market weakness or high VIX. "
-                    "Check the sector tables below for the best available options."
-                )
-            else:
-                # ── Render one card per top pick ─────────────
-                for rank, (_, r) in enumerate(filtered.iterrows(), 1):
-                    ticker  = r["Ticker"]
-                    sector  = r["Sector"]
-                    score   = r["Score"]
-                    rng     = r["52W Range %"]
-                    rs      = r["RS vs SPY"]
-                    pc_sig  = r["P/C Signal"]
-                    price   = r["Price"]
+            # ── Helper to render one expander per pick ────────
+            def render_picks(df, side):
+                """
+                side = "calls" or "puts"
+                Renders expander cards. For puts, shows lagging stocks
+                inside the ETF instead of leading ones.
+                """
+                if df.empty:
+                    st.info(
+                        "No clear candidates right now. "
+                        "Check the sector tables below for context."
+                    )
+                    return
 
-                    medals = {1:"🥇", 2:"🥈", 3:"🥉", 4:"4️⃣", 5:"5️⃣"}
+                medals = {1:"🥇", 2:"🥈", 3:"🥉", 4:"4️⃣", 5:"5️⃣"}
+
+                for rank, (_, r) in enumerate(df.iterrows(), 1):
+                    ticker = r["Ticker"]
+                    sector = r["Sector"]
+                    score  = r.get("Score", 0) or 0
+                    rng    = r.get("52W Range %", 0) or 0
+                    rs     = r.get("RS vs SPY", 0) or 0
+                    pc_sig = r.get("P/C Signal", "N/A")
+                    price  = r.get("Price", 0) or 0
                     medal  = medals.get(rank, "▶")
-                    filled = int(round(score / 10))
-                    bar    = "█" * filled + "░" * (10 - filled)
 
-                    tags = [
-                        f"✅ 52W Range {rng:.1f}%",
-                        f"✅ RS vs SPY {rs:+.1f}%",
-                        f"✅ {pc_sig}",
-                    ]
+                    if side == "calls":
+                        header = (
+                            f"{medal}  {ticker}  —  {sector}  —  "
+                            f"${price:.2f}  —  52W {rng:.1f}%  —  "
+                            f"RS vs SPY {rs:+.1f}%  ▼ expand for holdings"
+                        )
+                        summary_tag = f"✅ 52W {rng:.1f}% · RS {rs:+.1f}% · {pc_sig}"
+                        if rs >= 5 and rng >= 80:
+                            reason = (
+                                f"Strong uptrend — near 52W high and {rs:+.1f}% ahead "
+                                "of SPY. Look for leading stocks inside this ETF to buy calls on."
+                            )
+                        else:
+                            reason = (
+                                f"Solid momentum with positive RS vs SPY. "
+                                "Expand to find stocks leading this ETF — those are your call candidates."
+                            )
+                        status_filter = "✅ Leading"
+                        copy_label    = "📋 Leading stocks — copy into Step 3 for calls:"
 
-                    if rs >= 5 and rng >= 80:
-                        reason = (
-                            f"**{ticker}** is one of the strongest ETFs right now — "
-                            f"near its annual high and {rs:+.1f}% ahead of SPY. "
-                            "Expand below to see leading stocks."
+                    else:  # puts
+                        header = (
+                            f"{medal}  {ticker}  —  {sector}  —  "
+                            f"${price:.2f}  —  52W {rng:.1f}%  —  "
+                            f"RS vs SPY {rs:+.1f}%  ▼ expand for holdings"
                         )
-                    elif rs >= 2 and rng >= 65:
-                        reason = (
-                            f"**{ticker}** has solid momentum and is beating the market. "
-                            "Expand below to find the leading stocks inside this ETF."
-                        )
-                    else:
-                        reason = (
-                            f"**{ticker}** passes all quality filters (score {score:.0f}/100). "
-                            "Expand below to drill into holdings."
-                        )
+                        summary_tag = f"🔴 52W {rng:.1f}% · RS {rs:+.1f}% · {pc_sig}"
 
-                    # ── Use expander — Streamlit handles open/close natively ──
-                    # No session state, no rerun, no buttons needed.
-                    # Click the header to expand, click again to collapse.
-                    with st.expander(
-                        f"{medal}  {ticker}  —  {sector}  —  "
-                        f"${price:.2f}  —  Score {score:.0f}/100  —  "
-                        f"52W {rng:.1f}%  —  RS vs SPY {rs:+.1f}%  ▼ click to drill down",
-                        expanded=False,
-                    ):
-                        st.markdown("  ".join(tags))
+                        if rng <= 40 and rs <= -3:
+                            reason = (
+                                f"Clear downtrend — only {rng:.1f}% of its 52W range "
+                                f"and {rs:.1f}% behind SPY. "
+                                "Look for the weakest stocks inside this ETF — "
+                                "those lagging their own sector are the strongest put candidates."
+                            )
+                        elif pc_sig and "Bearish" in pc_sig and rng >= 60:
+                            reason = (
+                                f"Possible distribution — near 52W high ({rng:.1f}%) "
+                                "but the options market is loading up on puts. "
+                                "This sector may be topping. "
+                                "Look for stocks already rolling over inside the ETF."
+                            )
+                        else:
+                            reason = (
+                                f"Underperforming the market (RS {rs:+.1f}% vs SPY). "
+                                "Lagging stocks inside this ETF are your put candidates."
+                            )
+                        status_filter = "⚠️ Lagging"
+                        copy_label    = "📋 Lagging stocks — copy into Step 3 for puts:"
+
+                    with st.expander(header, expanded=False):
+                        st.markdown(summary_tag)
                         st.markdown(reason)
                         st.divider()
 
-                        # Holdings
                         with st.spinner(f"Fetching {ticker} holdings..."):
                             _holdings = fetch_holdings(ticker, fmp_key)
 
@@ -1002,15 +1043,17 @@ with tab1:
                                     f"https://etfdb.com/etf/{ticker}/#holdings",
                                     use_container_width=True,
                                 )
-                            st.info("Copy the top 10 tickers from either site → paste into Step 3")
+                            st.info("Copy tickers manually → paste into Step 3")
                         else:
                             _tickers = _holdings["Ticker"].tolist()
                             with st.spinner("Calculating relative strength vs ETF..."):
-                                _rs = calc_relative_strength(_tickers, ticker, period="1mo")
+                                _rs_df = calc_relative_strength(
+                                    _tickers, ticker, period="1mo"
+                                )
 
-                            if not _rs.empty:
+                            if not _rs_df.empty:
                                 _merged = _holdings.merge(
-                                    _rs[["Ticker", "Return (1mo) %", "vs ETF %", "Status"]],
+                                    _rs_df[["Ticker","Return (1mo) %","vs ETF %","Status"]],
                                     on="Ticker", how="left",
                                 )
                             else:
@@ -1032,21 +1075,52 @@ with tab1:
                                 hide_index=True,
                             )
 
-                            # Leading stocks + copy box
+                            # Pull the relevant stocks based on side
                             if "Status" in _merged.columns:
-                                _leading = _merged[
-                                    _merged["Status"] == "✅ Leading"
+                                _candidates = _merged[
+                                    _merged["Status"] == status_filter
                                 ]["Ticker"].tolist()
                             else:
-                                _leading = _tickers
+                                _candidates = _tickers
 
-                            if _leading:
-                                st.success(f"**Leading stocks:** {', '.join(_leading)}")
+                            if _candidates:
+                                if side == "calls":
+                                    st.success(
+                                        f"**Call candidates (leading):** "
+                                        f"{', '.join(_candidates)}"
+                                    )
+                                else:
+                                    st.error(
+                                        f"**Put candidates (lagging):** "
+                                        f"{', '.join(_candidates)}"
+                                    )
+
                             st.text_input(
-                                "📋 Copy these into Step 3:",
-                                value=", ".join(_leading),
-                                key=f"copy_{ticker}_{rank}",
+                                copy_label,
+                                value=", ".join(_candidates),
+                                key=f"copy_{side}_{ticker}_{rank}",
                             )
+
+            # ── Render both sides ─────────────────────────────
+            col_calls, col_puts = st.columns(2)
+            with col_calls:
+                st.markdown("### 📈 Best for Calls")
+                st.caption(
+                    "Strong uptrend, beating SPY, P/C not bearish. "
+                    "Expand any row to see the leading stocks inside — "
+                    "those are your call candidates."
+                )
+                render_picks(calls_filtered, "calls")
+
+            with col_puts:
+                st.markdown("### 📉 Best for Puts")
+                st.caption(
+                    "Weak / breaking down, lagging SPY, or heavy put buying "
+                    "near highs (distribution). "
+                    "Expand any row to see the lagging stocks inside — "
+                    "those are your put candidates."
+                )
+                render_picks(puts_filtered, "puts")
 
         st.divider()
 
