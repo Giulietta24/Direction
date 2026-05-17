@@ -940,144 +940,113 @@ with tab1:
                     rng     = r["52W Range %"]
                     rs      = r["RS vs SPY"]
                     pc_sig  = r["P/C Signal"]
-                    pc_val  = r["P/C Ratio"]
                     price   = r["Price"]
 
                     medals = {1:"🥇", 2:"🥈", 3:"🥉", 4:"4️⃣", 5:"5️⃣"}
                     medal  = medals.get(rank, "▶")
-
-                    # Score bar — convert 0-100 to filled blocks
                     filled = int(round(score / 10))
                     bar    = "█" * filled + "░" * (10 - filled)
 
-                    # Build signal tags
-                    tags = []
-                    tags.append(f"✅ 52W Range {rng:.1f}%")
-                    tags.append(f"✅ RS vs SPY {rs:+.1f}%")
-                    tags.append(f"✅ {pc_sig}")
+                    tags = [
+                        f"✅ 52W Range {rng:.1f}%",
+                        f"✅ RS vs SPY {rs:+.1f}%",
+                        f"✅ {pc_sig}",
+                    ]
 
-                    # Plain-English why this pick
                     if rs >= 5 and rng >= 80:
                         reason = (
-                            f"**{ticker}** is one of the strongest ETFs in the market right now — "
-                            f"near its annual high and running {rs:+.1f}% ahead of SPY. "
-                            "The holdings in this ETF are where institutional money is flowing. "
-                            "Drill down to find the leading stocks."
+                            f"**{ticker}** is one of the strongest ETFs right now — "
+                            f"near its annual high and {rs:+.1f}% ahead of SPY. "
+                            "Expand below to see leading stocks."
                         )
                     elif rs >= 2 and rng >= 65:
                         reason = (
-                            f"**{ticker}** has solid momentum and is outperforming the market. "
-                            f"At {rng:.1f}% of its 52W range with no bearish options signal, "
-                            "this sector has clear directional conviction worth following into individual names."
+                            f"**{ticker}** has solid momentum and is beating the market. "
+                            "Expand below to find the leading stocks inside this ETF."
                         )
                     else:
                         reason = (
-                            f"**{ticker}** passes all quality filters with a composite score of {score:.0f}. "
-                            "Momentum is positive and the options market is not flagging concern. "
-                            "Worth drilling into for individual stock opportunities."
+                            f"**{ticker}** passes all quality filters (score {score:.0f}/100). "
+                            "Expand below to drill into holdings."
                         )
 
-                    with st.container(border=True):
-                        col_rank, col_info, col_btn = st.columns([0.5, 5, 1.5])
+                    # ── Use expander — Streamlit handles open/close natively ──
+                    # No session state, no rerun, no buttons needed.
+                    # Click the header to expand, click again to collapse.
+                    with st.expander(
+                        f"{medal}  {ticker}  —  {sector}  —  "
+                        f"${price:.2f}  —  Score {score:.0f}/100  —  "
+                        f"52W {rng:.1f}%  —  RS vs SPY {rs:+.1f}%  ▼ click to drill down",
+                        expanded=False,
+                    ):
+                        st.markdown("  ".join(tags))
+                        st.markdown(reason)
+                        st.divider()
 
-                        with col_rank:
-                            st.markdown(f"## {medal}")
+                        # Holdings
+                        with st.spinner(f"Fetching {ticker} holdings..."):
+                            _holdings = fetch_holdings(ticker, fmp_key)
 
-                        with col_info:
-                            st.markdown(
-                                f"**{ticker}** &nbsp;&nbsp; "
-                                f"<span style='color:gray'>{sector}</span> &nbsp;&nbsp; "
-                                f"${price:.2f}",
-                                unsafe_allow_html=True
-                            )
-                            st.markdown(
-                                f"`{bar}` &nbsp; Score **{score:.0f} / 100**",
-                                unsafe_allow_html=True
-                            )
-                            st.markdown("  ".join(tags))
-                            st.markdown(reason)
-
-                        with col_btn:
-                            st.markdown("&nbsp;", unsafe_allow_html=True)
-                            drill_key = f"show_drill_{ticker}"
-                            if drill_key not in st.session_state:
-                                st.session_state[drill_key] = False
-                            if st.button(
-                                "Drill Down ↓",
-                                key=f"pick_drill_{ticker}",
-                                use_container_width=True,
-                                type="primary",
-                            ):
-                                st.session_state[drill_key] = True
-
-                    # ── Inline drill-down panel ───────────────
-                    # Opens directly below the card — no tab switching needed
-                    if st.session_state.get(f"show_drill_{ticker}", False):
-                        with st.container(border=True):
-                            st.markdown(f"#### 🔍 Holdings — {ticker} ({sector})")
-                            with st.spinner(f"Fetching {ticker} holdings..."):
-                                _holdings = fetch_holdings(ticker, fmp_key)
-
-                            if _holdings.empty:
-                                st.error(f"Could not fetch live holdings for {ticker}")
-                                c1, c2 = st.columns(2)
-                                with c1:
-                                    st.link_button(
-                                        f"stockanalysis.com — {ticker}",
-                                        f"https://stockanalysis.com/etf/{ticker.lower()}/holdings/",
-                                        use_container_width=True
-                                    )
-                                with c2:
-                                    st.link_button(
-                                        f"ETF Database — {ticker}",
-                                        f"https://etfdb.com/etf/{ticker}/#holdings",
-                                        use_container_width=True
-                                    )
-                                st.info("Copy the top 10 tickers → paste into Step 3")
-                            else:
-                                _tickers = _holdings["Ticker"].tolist()
-                                with st.spinner("Calculating relative strength..."):
-                                    _rs = calc_relative_strength(_tickers, ticker, period="1mo")
-
-                                if not _rs.empty:
-                                    _merged = _holdings.merge(
-                                        _rs[["Ticker","Return (1mo) %","vs ETF %","Status"]],
-                                        on="Ticker", how="left"
-                                    )
-                                else:
-                                    _merged = _holdings.copy()
-
-                                def _hl(row):
-                                    styles = [""] * len(row)
-                                    if "Status" in row.index:
-                                        i = list(row.index).index("Status")
-                                        if row["Status"] == "✅ Leading":
-                                            styles[i] = "background-color:#bbf7d0"
-                                        elif row["Status"] == "⚠️ Lagging":
-                                            styles[i] = "background-color:#fecaca"
-                                    return styles
-
-                                st.dataframe(
-                                    _merged.style.apply(_hl, axis=1),
-                                    use_container_width=True, hide_index=True
+                        if _holdings.empty:
+                            st.error(f"Could not fetch live holdings for {ticker}")
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                st.link_button(
+                                    f"🔍 stockanalysis.com — {ticker}",
+                                    f"https://stockanalysis.com/etf/{ticker.lower()}/holdings/",
+                                    use_container_width=True,
                                 )
+                            with c2:
+                                st.link_button(
+                                    f"🔍 ETF Database — {ticker}",
+                                    f"https://etfdb.com/etf/{ticker}/#holdings",
+                                    use_container_width=True,
+                                )
+                            st.info("Copy the top 10 tickers from either site → paste into Step 3")
+                        else:
+                            _tickers = _holdings["Ticker"].tolist()
+                            with st.spinner("Calculating relative strength vs ETF..."):
+                                _rs = calc_relative_strength(_tickers, ticker, period="1mo")
 
-                                # Leading stocks summary
-                                if "Status" in _merged.columns:
-                                    _leading = _merged[_merged["Status"]=="✅ Leading"]["Ticker"].tolist()
-                                    if _leading:
-                                        st.success(f"**Leading stocks:** {', '.join(_leading)}")
-                                        st.info("👉 Copy these into **Step 3** to check options suitability")
-                                    # Paste-ready string
-                                    st.text_input(
-                                        "Copy leading tickers for Step 3:",
-                                        value=", ".join(_leading) if _leading else "",
-                                        key=f"copy_tickers_{ticker}"
-                                    )
+                            if not _rs.empty:
+                                _merged = _holdings.merge(
+                                    _rs[["Ticker", "Return (1mo) %", "vs ETF %", "Status"]],
+                                    on="Ticker", how="left",
+                                )
+                            else:
+                                _merged = _holdings.copy()
 
-                            if st.button("Close ✕", key=f"close_drill_{ticker}"):
-                                st.session_state[f"show_drill_{ticker}"] = False
-                                st.rerun()
+                            def _hl(row):
+                                styles = [""] * len(row)
+                                if "Status" in row.index:
+                                    i = list(row.index).index("Status")
+                                    if row["Status"] == "✅ Leading":
+                                        styles[i] = "background-color:#bbf7d0"
+                                    elif row["Status"] == "⚠️ Lagging":
+                                        styles[i] = "background-color:#fecaca"
+                                return styles
+
+                            st.dataframe(
+                                _merged.style.apply(_hl, axis=1),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                            # Leading stocks + copy box
+                            if "Status" in _merged.columns:
+                                _leading = _merged[
+                                    _merged["Status"] == "✅ Leading"
+                                ]["Ticker"].tolist()
+                            else:
+                                _leading = _tickers
+
+                            if _leading:
+                                st.success(f"**Leading stocks:** {', '.join(_leading)}")
+                            st.text_input(
+                                "📋 Copy these into Step 3:",
+                                value=", ".join(_leading),
+                                key=f"copy_{ticker}_{rank}",
+                            )
 
         st.divider()
 
