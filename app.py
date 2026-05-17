@@ -1006,6 +1006,20 @@ with tab1:
                                 use_container_width=True,
                                 type="primary",
                             ):
+                                # Write directly into the selectbox widget keys.
+                                # Streamlit selectboxes store their value under their key —
+                                # setting index= is ignored if the key already has a value.
+                                # Overwriting the key directly is the only reliable way.
+                                sector_names_local = list(ETF_SECTORS.keys())
+                                etf_labels_local   = [f"{t}  —  {n}" for t, n in ETF_SECTORS.get(sector, [])]
+                                matching_label     = next((l for l in etf_labels_local if l.startswith(ticker)), None)
+
+                                if sector in sector_names_local:
+                                    st.session_state["s2_sector"] = sector
+                                if matching_label:
+                                    st.session_state["s2_etf"] = matching_label
+
+                                # Also store for the banner
                                 st.session_state["drill_sector"] = sector
                                 st.session_state["drill_ticker"] = ticker
                                 st.rerun()
@@ -1156,22 +1170,27 @@ with tab2:
     st.subheader("ETF Holdings Drill-Down")
     st.caption("See top holdings and which stocks are leading vs lagging the ETF.")
 
-    # Pre-fill from Top Picks if user clicked Drill Down there
-    _default_sector = st.session_state.get("drill_sector")
-    _default_ticker = st.session_state.get("drill_ticker")
-    sector_names    = list(ETF_SECTORS.keys())
-    sector_idx      = sector_names.index(_default_sector) if _default_sector in sector_names else 0
+    # Dropdowns — pre-filled automatically when user clicks Select → in Step 1.
+    # This works by writing the sector/etf values directly into the widget
+    # session state keys (s2_sector / s2_etf) before rerun.
+    sector_names  = list(ETF_SECTORS.keys())
+
+    # Show banner if an ETF has been selected from Top Picks
+    _sel_ticker = st.session_state.get("drill_ticker")
+    _sel_sector = st.session_state.get("drill_sector")
+    if _sel_ticker:
+        st.success(
+            f"✅ **{_sel_ticker}** ({_sel_sector}) pre-filled from Top Picks — "
+            "click **Drill Down** below."
+        )
 
     col_c, col_d = st.columns(2)
     with col_c:
-        sector_choice = st.selectbox("Sector", sector_names, index=sector_idx, key="s2_sector")
+        sector_choice = st.selectbox("Sector", sector_names, key="s2_sector")
     with col_d:
-        etf_labels = [f"{t}  —  {n}" for t, n in ETF_SECTORS[sector_choice]]
-        # find default index for the ticker if set
-        etf_tickers_only = [t for t, _ in ETF_SECTORS[sector_choice]]
-        etf_idx    = etf_tickers_only.index(_default_ticker) if _default_ticker in etf_tickers_only else 0
-        etf_choice = st.selectbox("ETF", etf_labels, index=etf_idx, key="s2_etf")
-        etf_ticker = etf_choice.split("  —  ")[0].strip()
+        etf_labels    = [f"{t}  —  {n}" for t, n in ETF_SECTORS[sector_choice]]
+        etf_choice    = st.selectbox("ETF", etf_labels, key="s2_etf")
+        etf_ticker    = etf_choice.split("  —  ")[0].strip()
 
     period = st.radio("Comparison period", ["1wk","1mo","3mo"], index=1, horizontal=True, key="s2_period")
 
