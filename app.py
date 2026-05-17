@@ -139,6 +139,36 @@ ETF_SECTORS = {
         ("XLC",  "Communication Services Select"),
         ("METV", "Roundhill Metaverse"),
     ],
+
+    # ── MACRO / RATES ─────────────────────────────────────────
+    # Critical context for ALL options plays.
+    # TLT falling = rates rising = headwind for growth stocks.
+    # HYG falling = credit stress = risk-off, avoid naked calls.
+    # GLD rising = fear in market = broad hedging driving up P/C ratios.
+    "Macro / Rates": [
+        ("TLT",  "iShares 20Y Treasury"),
+        ("HYG",  "iShares High Yield Corp"),
+        ("GLD",  "SPDR Gold"),
+        ("SLV",  "iShares Silver"),
+    ],
+
+    # ── INTERNATIONAL / CHINA ────────────────────────────────
+    # KWEB moves independently of US markets — useful for
+    # uncorrelated plays when US sectors are all moving together.
+    "International / China": [
+        ("KWEB", "KraneShares China Internet"),
+        ("FXI",  "iShares China Large Cap"),
+        ("EEM",  "iShares Emerging Markets"),
+    ],
+
+    # ── HIGH VOL / SPECULATIVE ───────────────────────────────
+    # These have elevated IV making them good for selling premium
+    # or for large directional bets when momentum is clear.
+    "High Vol / Speculative": [
+        ("ARKK", "ARK Innovation"),
+        ("JETS", "US Global Airlines"),
+        ("XHB",  "SPDR Homebuilders"),
+    ],
 }
 
 ALL_TICKERS = list(dict.fromkeys(
@@ -206,16 +236,22 @@ def fetch_vix():
         return None
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)   # 30-min cache — 1D/3D data needs to be fresh
 def fetch_all_returns(tickers):
     """
     Single batch download for all ETFs + SPY.
-    Returns dict: ticker -> {ret_1w, ret_1m, ret_3m, rs_vs_spy}
+    Returns dict: ticker -> {ret_1d, ret_3d, ret_1w, ret_1m, ret_3m, rs_vs_spy}
     One network call instead of 65 — much faster.
+
+    Why 1D and 3D:
+      In volatile markets the 1-week and 1-month picture can look fine
+      while the last 1-3 days have already started rolling over.
+      Catching that early is critical for options timing.
+      1D = is it moving today?  3D = is there a short-term trend forming?
     """
     all_t = list(set(tickers + ["SPY"]))
     try:
-        raw    = yf.download(all_t, period="3mo", auto_adjust=True, progress=False)
+        raw    = yf.download(all_t, period="6mo", auto_adjust=True, progress=False)
         closes = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
 
         def safe_ret(series, n):
@@ -231,6 +267,8 @@ def fetch_all_returns(tickers):
             try:
                 r1m = safe_ret(closes[t], 21)
                 results[t] = {
+                    "ret_1d":    safe_ret(closes[t], 1),    # today vs yesterday
+                    "ret_3d":    safe_ret(closes[t], 3),    # last 3 trading days
                     "ret_1w":    safe_ret(closes[t], 5),
                     "ret_1m":    r1m,
                     "ret_3m":    safe_ret(closes[t], 63),
@@ -725,6 +763,24 @@ with st.sidebar:
     st.markdown("**IV Signal (Step 3)**")
     st.markdown("🟢 IV/HV <0.8 Buy  🟡 0.8–1.2 Fair  🔴 >1.2 Sell premium")
 
+    st.divider()
+    st.markdown("**➕ Add Custom ETFs to Step 1**")
+    st.caption(
+        "Type any ETF tickers here to add them to the screener. "
+        "Useful for ETFs not in the default list, "
+        "or to quickly check a specific ETF you have in mind."
+    )
+    custom_input = st.text_input(
+        "Extra tickers (comma separated)",
+        placeholder="e.g. ARKK, HACK, MSOS",
+        key="custom_tickers",
+    )
+    if custom_input:
+        custom_tickers = [t.strip().upper() for t in custom_input.split(",") if t.strip()]
+        st.caption(f"Will scan: {', '.join(custom_tickers)}")
+    else:
+        custom_tickers = []
+
 
 # ============================================================
 # MAIN
@@ -779,11 +835,16 @@ with tab1:
                     if ticker in returns_data:
                         d = returns_data[ticker]
                         hm_rows.append({
-                            "Sector": sector, "Ticker": ticker,
-                            "1W %": d.get("ret_1w"), "1M %": d.get("ret_1m"),
-                            "3M %": d.get("ret_3m"), "RS vs SPY": d.get("rs_vs_spy"),
+                            "Sector":     sector,
+                            "Ticker":     ticker,
+                            "1D %":       d.get("ret_1d"),
+                            "3D %":       d.get("ret_3d"),
+                            "1W %":       d.get("ret_1w"),
+                            "1M %":       d.get("ret_1m"),
+                            "3M %":       d.get("ret_3m"),
+                            "RS vs SPY":  d.get("rs_vs_spy"),
                         })
-            hm_df = pd.DataFrame(hm_rows).dropna(subset=["1W %","1M %","3M %"], how="all")
+            hm_df = pd.DataFrame(hm_rows).dropna(subset=["1D %","1W %","1M %"], how="all")
 
             if not hm_df.empty:
                 def _hm(val):
@@ -794,7 +855,14 @@ with tab1:
                     if val >= -5:  return "background-color:#fecaca"
                     return "background-color:#991b1b;color:white"
 
-                num_cols = ["1W %","1M %","3M %","RS vs SPY"]
+                num_cols = ["1D %","3D %","1W %","1M %","3M %","RS vs SPY"]
+                st.caption(
+                    "**Reading the heatmap in volatile markets:** "
+                    "Look left to right — if 1D and 3D are green but 1M is red, "
+                    "the sector is recovering. If 1D/3D are red but 1M is green, "
+                    "the sector may be topping out. "
+                    "The most actionable plays have green across ALL columns."
+                )
                 st.dataframe(
                     hm_df.style.map(_hm, subset=num_cols)
                     .format({c: "{:+.1f}%" for c in num_cols}, na_rep="N/A"),
@@ -811,17 +879,35 @@ with tab1:
         st.caption(
             "Top-ranked ETFs that pass all quality filters: "
             "strong momentum, beating SPY, P/C not heavily bearish, "
-            "no distribution warning. Drill down into any of these first."
+            "no distribution warning. "
+            "Click **Select →** on any card — the Step 2 dropdowns will auto-fill. "
+            "Then click the **Step 2** tab."
         )
+
+        # Show currently selected ETF as a banner
+        _sel = st.session_state.get("drill_ticker")
+        _sel_sector = st.session_state.get("drill_sector")
+        if _sel:
+            st.success(
+                f"✅ **{_sel}** ({_sel_sector}) is selected for drill-down. "
+                "Click the **🔍 Step 2 — Holdings Drill-Down** tab above, "
+                "then click **Drill Down** — it will be pre-filled."
+            )
 
         with st.spinner("Scanning all ETFs for top picks..."):
             picks_rows = []
             for sector, etfs in ETF_SECTORS.items():
                 for ticker, name in etfs:
                     if ticker == "SPY":
-                        continue   # SPY is the benchmark, not a pick
+                        continue
                     row = fetch_etf_row(ticker, name, returns_data=returns_data, vix=vix)
                     row["Sector"] = sector
+                    picks_rows.append(row)
+            # Also scan any custom tickers added in the sidebar
+            for ticker in custom_tickers:
+                if not any(r["Ticker"] == ticker for r in picks_rows):
+                    row = fetch_etf_row(ticker, ticker, returns_data=returns_data, vix=vix)
+                    row["Sector"] = "📌 Custom"
                     picks_rows.append(row)
 
         if picks_rows:
@@ -913,19 +999,16 @@ with tab1:
 
                         with col_btn:
                             st.markdown("&nbsp;", unsafe_allow_html=True)
+                            # Store selection — Step 2 dropdowns will auto-select this ETF
                             if st.button(
-                                "Drill Down →",
+                                "Select →",
                                 key=f"pick_drill_{ticker}",
                                 use_container_width=True,
                                 type="primary",
                             ):
                                 st.session_state["drill_sector"] = sector
                                 st.session_state["drill_ticker"] = ticker
-                                st.info(
-                                    f"✅ **{ticker}** selected — click the "
-                                    "**Step 2 — Holdings Drill-Down** tab above, "
-                                    "then click **Drill Down**."
-                                )
+                                st.rerun()
 
         st.divider()
 
@@ -1026,6 +1109,23 @@ with tab1:
                         st.divider()
                         st.markdown("### 🎯 Overall Interpretation")
                         st.markdown(interp["conclusion"])
+
+        # ── Custom tickers section ───────────────────────────
+        if custom_tickers:
+            st.markdown("### 📌 Custom ETFs")
+            custom_rows = []
+            bar = st.progress(0, text="Fetching custom tickers...")
+            for i, ticker in enumerate(custom_tickers):
+                row = fetch_etf_row(ticker, ticker, returns_data=returns_data, vix=vix)
+                custom_rows.append(row)
+                all_rows.append(row)
+                bar.progress((i+1)/len(custom_tickers), text=f"Fetching {ticker}...")
+                time.sleep(0.1)
+            bar.empty()
+            custom_df = pd.DataFrame(custom_rows)
+            display_cols = ["Ticker","Name","Price","52W Range %","RS vs SPY","Score","P/C Ratio","P/C Signal","Sentiment"]
+            custom_display = custom_df[[c for c in display_cols if c in custom_df.columns]]
+            st.dataframe(custom_display, use_container_width=True, hide_index=True)
 
         # ── Bar chart ─────────────────────────────────────────
         if all_rows:
