@@ -738,6 +738,12 @@ tab1, tab2, tab3 = st.tabs([
     "⚡ Step 3 — Options Filter",
 ])
 
+# Session state — lets Top Picks cards pre-fill the Step 2 dropdowns
+if "drill_sector" not in st.session_state:
+    st.session_state["drill_sector"] = None
+if "drill_ticker" not in st.session_state:
+    st.session_state["drill_ticker"] = None
+
 
 # ============================================================
 # TAB 1
@@ -795,6 +801,133 @@ with tab1:
                     use_container_width=True, hide_index=True, height=400,
                 )
             st.divider()
+
+        # ── Top Picks panel ──────────────────────────────────
+        # Scans every ETF across every sector and surfaces the top 5
+        # options opportunities based on composite score + quality filters.
+        # Appears before the sector tables so you can act without scrolling.
+
+        st.subheader("🎯 Best for Options Right Now")
+        st.caption(
+            "Top-ranked ETFs that pass all quality filters: "
+            "strong momentum, beating SPY, P/C not heavily bearish, "
+            "no distribution warning. Drill down into any of these first."
+        )
+
+        with st.spinner("Scanning all ETFs for top picks..."):
+            picks_rows = []
+            for sector, etfs in ETF_SECTORS.items():
+                for ticker, name in etfs:
+                    if ticker == "SPY":
+                        continue   # SPY is the benchmark, not a pick
+                    row = fetch_etf_row(ticker, name, returns_data=returns_data, vix=vix)
+                    row["Sector"] = sector
+                    picks_rows.append(row)
+
+        if picks_rows:
+            picks_df = pd.DataFrame(picks_rows)
+
+            # ── Quality filter ────────────────────────────────
+            # Must pass ALL of these to surface as a top pick
+            filtered = picks_df[
+                (picks_df["Score"].fillna(0)        >= 60)   &   # strong composite
+                (picks_df["RS vs SPY"].fillna(-99)  >= 0)    &   # beating the market
+                (picks_df["52W Range %"].fillna(0)  >= 55)   &   # near annual high
+                (~picks_df["P/C Signal"].str.contains("Bearish", na=False))  # P/C not bearish
+            ].copy()
+
+            # ── Sort by composite score ───────────────────────
+            filtered = filtered.sort_values("Score", ascending=False).head(5)
+
+            if filtered.empty:
+                st.info(
+                    "No ETFs currently pass all quality filters. "
+                    "This typically happens during broad market weakness or high VIX. "
+                    "Check the sector tables below for the best available options."
+                )
+            else:
+                # ── Render one card per top pick ─────────────
+                for rank, (_, r) in enumerate(filtered.iterrows(), 1):
+                    ticker  = r["Ticker"]
+                    sector  = r["Sector"]
+                    score   = r["Score"]
+                    rng     = r["52W Range %"]
+                    rs      = r["RS vs SPY"]
+                    pc_sig  = r["P/C Signal"]
+                    pc_val  = r["P/C Ratio"]
+                    price   = r["Price"]
+
+                    medals = {1:"🥇", 2:"🥈", 3:"🥉", 4:"4️⃣", 5:"5️⃣"}
+                    medal  = medals.get(rank, "▶")
+
+                    # Score bar — convert 0-100 to filled blocks
+                    filled = int(round(score / 10))
+                    bar    = "█" * filled + "░" * (10 - filled)
+
+                    # Build signal tags
+                    tags = []
+                    tags.append(f"✅ 52W Range {rng:.1f}%")
+                    tags.append(f"✅ RS vs SPY {rs:+.1f}%")
+                    tags.append(f"✅ {pc_sig}")
+
+                    # Plain-English why this pick
+                    if rs >= 5 and rng >= 80:
+                        reason = (
+                            f"**{ticker}** is one of the strongest ETFs in the market right now — "
+                            f"near its annual high and running {rs:+.1f}% ahead of SPY. "
+                            "The holdings in this ETF are where institutional money is flowing. "
+                            "Drill down to find the leading stocks."
+                        )
+                    elif rs >= 2 and rng >= 65:
+                        reason = (
+                            f"**{ticker}** has solid momentum and is outperforming the market. "
+                            f"At {rng:.1f}% of its 52W range with no bearish options signal, "
+                            "this sector has clear directional conviction worth following into individual names."
+                        )
+                    else:
+                        reason = (
+                            f"**{ticker}** passes all quality filters with a composite score of {score:.0f}. "
+                            "Momentum is positive and the options market is not flagging concern. "
+                            "Worth drilling into for individual stock opportunities."
+                        )
+
+                    with st.container(border=True):
+                        col_rank, col_info, col_btn = st.columns([0.5, 5, 1.5])
+
+                        with col_rank:
+                            st.markdown(f"## {medal}")
+
+                        with col_info:
+                            st.markdown(
+                                f"**{ticker}** &nbsp;&nbsp; "
+                                f"<span style='color:gray'>{sector}</span> &nbsp;&nbsp; "
+                                f"${price:.2f}",
+                                unsafe_allow_html=True
+                            )
+                            st.markdown(
+                                f"`{bar}` &nbsp; Score **{score:.0f} / 100**",
+                                unsafe_allow_html=True
+                            )
+                            st.markdown("  ".join(tags))
+                            st.markdown(reason)
+
+                        with col_btn:
+                            st.markdown("&nbsp;", unsafe_allow_html=True)
+                            if st.button(
+                                "Drill Down →",
+                                key=f"pick_drill_{ticker}",
+                                use_container_width=True,
+                                type="primary",
+                            ):
+                                st.session_state["drill_sector"] = sector
+                                st.session_state["drill_ticker"] = ticker
+                                st.info(
+                                    f"✅ **{ticker}** selected — click the "
+                                    "**Step 2 — Holdings Drill-Down** tab above, "
+                                    "then click **Drill Down**."
+                                )
+
+        st.divider()
 
         # ── Per-sector tables ─────────────────────────────────
         all_rows = []
@@ -923,12 +1056,21 @@ with tab2:
     st.subheader("ETF Holdings Drill-Down")
     st.caption("See top holdings and which stocks are leading vs lagging the ETF.")
 
+    # Pre-fill from Top Picks if user clicked Drill Down there
+    _default_sector = st.session_state.get("drill_sector")
+    _default_ticker = st.session_state.get("drill_ticker")
+    sector_names    = list(ETF_SECTORS.keys())
+    sector_idx      = sector_names.index(_default_sector) if _default_sector in sector_names else 0
+
     col_c, col_d = st.columns(2)
     with col_c:
-        sector_choice = st.selectbox("Sector", list(ETF_SECTORS.keys()), key="s2_sector")
+        sector_choice = st.selectbox("Sector", sector_names, index=sector_idx, key="s2_sector")
     with col_d:
         etf_labels = [f"{t}  —  {n}" for t, n in ETF_SECTORS[sector_choice]]
-        etf_choice = st.selectbox("ETF", etf_labels, key="s2_etf")
+        # find default index for the ticker if set
+        etf_tickers_only = [t for t, _ in ETF_SECTORS[sector_choice]]
+        etf_idx    = etf_tickers_only.index(_default_ticker) if _default_ticker in etf_tickers_only else 0
+        etf_choice = st.selectbox("ETF", etf_labels, index=etf_idx, key="s2_etf")
         etf_ticker = etf_choice.split("  —  ")[0].strip()
 
     period = st.radio("Comparison period", ["1wk","1mo","3mo"], index=1, horizontal=True, key="s2_period")
