@@ -236,49 +236,115 @@ def fetch_vix():
         return None
 
 
-@st.cache_data(ttl=1800)   # 30-min cache — 1D/3D data needs to be fresh
+@st.cache_data(ttl=300)    # 5-min cache — intraday 1D needs to stay fresh
 def fetch_all_returns(tickers):
     """
     Single batch download for all ETFs + SPY.
     Returns dict: ticker -> {ret_1d, ret_3d, ret_1w, ret_1m, ret_3m, rs_vs_spy}
-    One network call instead of 65 — much faster.
 
-    Why 1D and 3D:
-      In volatile markets the 1-week and 1-month picture can look fine
-      while the last 1-3 days have already started rolling over.
-      Catching that early is critical for options timing.
-      1D = is it moving today?  3D = is there a short-term trend forming?
+    Why 1D was always showing 0%:
+      Daily data (period="6mo", interval="1d") only has one row per day.
+      During market hours today's row hasn't closed yet — so iloc[-1] and
+      iloc[-2] are the same price → 0%.
+      Fix: fetch 1D using intraday 5-minute data (period="1d", interval="5m")
+      and compare the latest tick to the previous day's close.
+      This gives a live intraday return that updates every 5 minutes.
     """
     all_t = list(set(tickers + ["SPY"]))
+
+    # ── Step 1: Daily data for 3D / 1W / 1M / 3M ─────────────
     try:
-        raw    = yf.download(all_t, period="6mo", auto_adjust=True, progress=False)
-        closes = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
+        raw_daily = yf.download(
+            all_t, period="6mo", interval="1d",
+            auto_adjust=True, progress=False
+        )
+        if isinstance(raw_daily.columns, pd.MultiIndex):
+            daily_closes = raw_daily["Close"]
+        else:
+            daily_closes = raw_daily
 
-        def safe_ret(series, n):
-            s = series.dropna()
-            return round((float(s.iloc[-1]) / float(s.iloc[-n]) - 1) * 100, 2) if len(s) >= n else None
-
-        spy_1m = safe_ret(closes["SPY"], 21) if "SPY" in closes.columns else None
-
-        results = {}
-        for t in tickers:
-            if t not in closes.columns:
-                continue
-            try:
-                r1m = safe_ret(closes[t], 21)
-                results[t] = {
-                    "ret_1d":    safe_ret(closes[t], 1),    # today vs yesterday
-                    "ret_3d":    safe_ret(closes[t], 3),    # last 3 trading days
-                    "ret_1w":    safe_ret(closes[t], 5),
-                    "ret_1m":    r1m,
-                    "ret_3m":    safe_ret(closes[t], 63),
-                    "rs_vs_spy": round(r1m - spy_1m, 2) if (r1m and spy_1m) else None,
-                }
-            except Exception:
-                pass
-        return results
+        # Strip timezone
+        if hasattr(daily_closes.index, "tz") and daily_closes.index.tz:
+            daily_closes.index = daily_closes.index.tz_localize(None)
     except Exception:
-        return {}
+        daily_closes = pd.DataFrame()
+
+    # ── Step 2: Intraday data for live 1D return ───────────────
+    # Uses 5-minute bars for today + yesterday so we can compare
+    # current price to yesterday's close in real time.
+    try:
+        raw_intra = yf.download(
+            all_t, period="5d", interval="5m",
+            auto_adjust=True, progress=False
+        )
+        if isinstance(raw_intra.columns, pd.MultiIndex):
+            intra_closes = raw_intra["Close"]
+        else:
+            intra_closes = raw_intra
+
+        # Strip timezone
+        if hasattr(intra_closes.index, "tz") and intra_closes.index.tz:
+            intra_closes.index = intra_closes.index.tz_localize(None)
+
+        # Get yesterday's date (last completed trading day)
+        today     = pd.Timestamp.now().normalize()
+        yesterday = today - pd.tseries.offsets.BDay(1)
+    except Exception:
+        intra_closes = pd.DataFrame()
+        yesterday    = None
+
+    def safe_ret_daily(series, n):
+        s = series.dropna()
+        return round((float(s.iloc[-1]) / float(s.iloc[-n]) - 1) * 100, 2) if len(s) >= n else None
+
+    def live_1d_ret(ticker):
+        """
+        Compare the latest intraday price to yesterday's close.
+        This gives a real-time today-so-far return.
+        """
+        if intra_closes.empty or yesterday is None:
+            return None
+        col = ticker if ticker in intra_closes.columns else None
+        if col is None:
+            return None
+        series = intra_closes[col].dropna()
+        if series.empty:
+            return None
+        latest_price = float(series.iloc[-1])
+        # Find yesterday's last bar
+        prev_bars = series[series.index.normalize() <= yesterday]
+        if prev_bars.empty:
+            return None
+        prev_close = float(prev_bars.iloc[-1])
+        if prev_close == 0:
+            return None
+        return round((latest_price / prev_close - 1) * 100, 2)
+
+    spy_1m = safe_ret_daily(daily_closes["SPY"], 21) if (
+        not daily_closes.empty and "SPY" in daily_closes.columns
+    ) else None
+
+    results = {}
+    for t in all_t:
+        try:
+            r1m = safe_ret_daily(daily_closes[t], 21) if (
+                not daily_closes.empty and t in daily_closes.columns
+            ) else None
+
+            results[t] = {
+                "ret_1d":    live_1d_ret(t),
+                "ret_3d":    safe_ret_daily(daily_closes[t], 3) if (
+                    not daily_closes.empty and t in daily_closes.columns) else None,
+                "ret_1w":    safe_ret_daily(daily_closes[t], 5) if (
+                    not daily_closes.empty and t in daily_closes.columns) else None,
+                "ret_1m":    r1m,
+                "ret_3m":    safe_ret_daily(daily_closes[t], 63) if (
+                    not daily_closes.empty and t in daily_closes.columns) else None,
+                "rs_vs_spy": round(r1m - spy_1m, 2) if (r1m and spy_1m) else None,
+            }
+        except Exception:
+            pass
+    return results
 
 
 @st.cache_data(ttl=3600)
